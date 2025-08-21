@@ -80,7 +80,7 @@ Usec_Hashtable* usec_ht_from(const Usec_Hashtable* source) {
 	for (size_t i = 0; i < source->capacity; ++i) {
 		Usec_HashNode* node = source->buckets[i];
 		while (node) {
-			USEC_Value* copy = usec_parser_clone_value(node->value);
+			USEC_Value* copy = usec_clone_value(node->value);
 			usec_ht_set(dest, node->key, copy);
 			node = node->next;
 		}
