@@ -1,0 +1,31 @@
+:version = "2.1"
+num = 1
+char = 'c'
+array = [1, 2, "3", {
+    object = {
+        id = 12
+        version = version
+        # comment
+        path = "/root/home/weird directory()!? name$(version) with \" inline \\ \n escapes/$(version)/project" # $() for string interpolation
+    }, object2 = {id = 24, version = version, path = "./main-tools/$(version)/project"}
+}]
+"weird +#_89() variable name" = 5
+
+%%
+super long
+descriptive
+multiline
+comment
+%%
+object = {
+    :version = "$(version).3" # scoped variable override
+    id = 42
+    version = version
+}
+
+# multline strings ignore empty first and last newlines
+description = `
+multiline
+string
+with $(version) interpolation
+`

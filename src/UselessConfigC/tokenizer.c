@@ -49,8 +49,8 @@ static char current(USEC_Tokenizer* t) {
 	return (t->index >= t->length) ? '\0' : t->input[t->index];
 }
 
-static char peek(USEC_Tokenizer* t, int offset) {
-	size_t p = t->index + offset;
+static char peek(USEC_Tokenizer* t) {
+	size_t p = t->index + 1;
 	return (p >= t->length) ? '\0' : t->input[p];
 }
 
@@ -234,14 +234,15 @@ static void read_multiline_comment(USEC_Tokenizer* t) {
 	next(t); // %
 	next(t); // %
 
-	while (current(t) && !(current(t) == '%' && peek(t, 1) == '%')) {
+	while (current(t) && !(current(t) == '%' && peek(t) == '%')) {
+		if (current(t) == '\\') next(t);
 		next(t);
 	}
 
 	size_t len = t->index - start;
 	//add_token(t, TOK_COMMENT, t->input + start, len); // comments are simply ignored
 
-	if (current(t) == '%' && peek(t, 1) == '%') {
+	if (current(t) == '%' && peek(t) == '%') {
 		next(t); next(t); // skip closing %%
 	}
 }
@@ -276,32 +277,33 @@ static void read_string(USEC_Tokenizer* t) {
 
 	size_t start_col = t->col;
 	int start_line = t->line;
-	StringBuilder sb = sb_create();
+	SB sb = sb_create();
 
-	while (!current(t) == '\0') {
+	while (current(t) != '\0') {
 		char ch = current(t);
 
 		if (ch == '"') {
 			if (sb.length > 0) {
 				add_token(t, TOK_STRING, sb.buffer, sb.length);
-				sb.buffer = NULL;
+				sb_clear(&sb);
 			}
 			add_token(t, TOK_STRING_END, "\"", 1);
 			next(t);
 			break;
-		} else if (ch == '$' && peek(t, 1) == '(') {
+		} else if (ch == '$' && peek(t) == '(') {
 			if (sb.length > 0) {
 				add_token(t, TOK_STRING, sb.buffer, sb.length);
-				sb.buffer = NULL;
+				sb_clear(&sb);
 			}
 			read_interpolation(t);
+			continue;
 		} else if (ch == '\\') {
 			next(t);
 			sb_append_str(&sb, escape_char(current(t)));
 		} else if (ch == '\n') {
 			if (sb.length > 0) {
 				add_token(t, TOK_STRING, sb.buffer, sb.length);
-				sb.buffer = NULL;
+				sb_clear(&sb);
 			}
 			error(t, "Unclosed string");
 			next(t);
@@ -311,6 +313,9 @@ static void read_string(USEC_Tokenizer* t) {
 		}
 
 		next(t);
+	}
+	if (sb.length > 0) {
+		add_token(t, TOK_STRING, sb.buffer, sb.length);
 	}
 
 	sb_free(&sb);
@@ -322,19 +327,20 @@ static void read_multiline_string(USEC_Tokenizer* t) {
 
 	size_t start_col = t->col;
 	int start_line = t->line;
-	StringBuilder sb = sb_create();
+	SB sb = sb_create();
 
 	// Skip first newline if exists right after opening `
+	if (current(t) == '\r') next(t);
 	if (current(t) == '\n') next(t);
 
-	while (!current(t) == '\0') {
+	while (current(t) != '\0') {
 		char ch = current(t);
-		char pk = peek(t, 1);
+		char pk = peek(t);
 
 		if (ch == '`') {
 			if (sb.length > 0) {
 				add_token(t, TOK_STRING, sb.buffer, sb.length);
-				sb.buffer = NULL;
+				sb_clear(&sb);
 			}
 			add_token(t, TOK_STRING_END, "`", 1);
 			next(t);
@@ -342,9 +348,15 @@ static void read_multiline_string(USEC_Tokenizer* t) {
 		} else if (ch == '$' && pk == '(') {
 			if (sb.length > 0) {
 				add_token(t, TOK_STRING, sb.buffer, sb.length);
-				sb.buffer = NULL;
+				sb_clear(&sb);
 			}
 			read_interpolation(t);
+			continue;
+		} else if (ch == '\r') {
+			next(t);
+			if (current(t) == '\n') next(t);
+			if (current(t) != '`') sb_append_char(&sb, '\n');
+			continue;
 		} else if (ch == '\n' && pk == '`') {
 			next(t); // skip newline before closing backtick
 			continue;
@@ -357,13 +369,16 @@ static void read_multiline_string(USEC_Tokenizer* t) {
 
 		next(t);
 	}
+	if (sb.length > 0) {
+		add_token(t, TOK_STRING, sb.buffer, sb.length);
+	}
 
 	sb_free(&sb);
 }
 
 static void read_statement(USEC_Tokenizer* t) {
 	char ch = current(t);
-	char pk = peek(t, 1);
+	char pk = peek(t);
 
 	USEC_Token* last = t->token_count > 0 ? &t->tokens[t->token_count - 1] : NULL;
 	USEC_Token* lo = t->opener_stack_size > 0 ? &t->opener_stack[t->opener_stack_size - 1] : NULL;
@@ -429,8 +444,7 @@ static void read_statement(USEC_Tokenizer* t) {
 
 	// Characters
 	else if (ch == '\'') {
-		USEC_Token tok = read_char(t);
-		add_token(t, &tok);
+		read_char(t);
 	}
 
 	// Quoted string
@@ -458,8 +472,7 @@ static void read_statement(USEC_Tokenizer* t) {
 
 	// Commas treated as newlines
 	else if (ch == ',') {
-		if (!t->compact &&
-			pk != '\0' && pk != ' ' && pk != '\n' && pk != '\r') {
+		if (!t->compact && pk != '\0' && pk != ' ' && pk != '\n' && pk != '\r') {
 			error(t, "Missing whitespace after comma");
 		}
 		if (!last || last->type == TOK_SPACE || last->type == TOK_NEWLINE)
@@ -497,136 +510,6 @@ static void read_statement(USEC_Tokenizer* t) {
 	}
 }
 
-static void read_statement(USEC_Tokenizer* t) {
-	char ch = current(t);
-	char pk = peek(t, 1);
-	USEC_Token* last = t->token_count > 0 ? &t->tokens[t->token_count - 1] : NULL;
-
-	// Multiline comment %%
-	if (ch == '%' && pk == '%') {
-		if (t->compact) error(t, "Comments not allowed in compact mode");
-		read_multiline_comment(t);
-		return;
-	}
-
-	// Line comment #
-	if (ch == '#') {
-		if (t->compact) error(t, "Comments not allowed in compact mode");
-		read_comment(t);
-		return;
-	}
-
-	// Identifier / keyword
-	if (is_start_identifier(ch)) {
-		read_identifier(t);
-		return;
-	}
-
-	// Character literal
-	if (ch == '\'') {
-		USEC_Token tok = read_char(t);
-		add_token(t, &tok);
-		return;
-	}
-
-	// String literal
-	if (ch == '"') {
-		add_string(t);
-		return;
-	}
-
-	// Multiline string literal
-	if (ch == '`') {
-		add_multiline_string(t);
-		return;
-	}
-
-	// Numbers
-	if (isdigit(ch) || ch == '-') {
-		read_number(t);
-		return;
-	}
-
-	// Symbols / operators
-	switch (ch) {
-	case '!': add_token(t, TOK_EXCLAMATION, "!", 1); next(t); break;
-	case ':': add_token(t, TOK_COLON, ":", 1); next(t); break;
-	case '=': add_token(t, TOK_EQUALS, "=", 1); next(t); break;
-	case '[':
-		add_token(t, TOK_ARRAY_OPEN, "[", 1);
-		push_opener(t, &t->tokens[t->token_count - 1]);
-		next(t);
-		break;
-	case ']':
-		add_token(t, TOK_ARRAY_CLOSE, "]", 1);
-		if (t->opener_stack_size > 0 &&
-			strcmp(t->opener_stack[t->opener_stack_size - 1].value, "[") == 0) {
-			t->opener_stack_size--;
-		} else {
-			error(t, "Unopened closer ']'");
-		}
-		next(t);
-		break;
-	case '{':
-		add_token(t, TOK_BRACE_OPEN, "{", 1);
-		push_opener(t, &t->tokens[t->token_count - 1]);
-		next(t);
-		break;
-	case '}':
-		add_token(t, TOK_BRACE_CLOSE, "}", 1);
-		if (t->opener_stack_size > 0 &&
-			strcmp(t->opener_stack[t->opener_stack_size - 1].value, "{") == 0) {
-			t->opener_stack_size--;
-		} else {
-			error(t, "Unopened closer '}'");
-		}
-		next(t);
-		break;
-	case ' ':
-		if (last && last->type != TOK_SPACE && last->type != TOK_NEWLINE) {
-			add_token(t, TOK_SPACE, " ", 1);
-		} else if (t->compact) {
-			error(t, "Unnecessary space");
-		}
-		next(t);
-		break;
-	case ',':
-		if (!t->compact && pk != '\0' && pk != ' ' && pk != '\n' && pk != '\r') {
-			error(t, "Missing whitespace after comma");
-		}
-		if (!last || last->type == TOK_SPACE || last->type == TOK_NEWLINE)
-			error(t, "Invalid comma");
-		add_token(t, TOK_NEWLINE, ",", 1);
-		next(t);
-		break;
-	case '\n':
-		if (last && last->type == TOK_SPACE) {
-			if (t->compact) error(t, "Unnecessary space");
-			last->type = TOK_NEWLINE;
-			last->value[0] = '\n';
-		} else if (last && last->type == TOK_NEWLINE) {
-			if (t->compact) error(t, "Unnecessary newline");
-		} else {
-			add_token(t, TOK_NEWLINE, "\n", 1);
-		}
-		next(t);
-		break;
-	case '\r':
-		if (pk == '\n') {
-			add_token(t, TOK_NEWLINE, "\r\n", 2);
-			next(t); next(t);
-		}
-		break;
-	default: {
-		char msg[64];
-		snprintf(msg, sizeof(msg), "Unexpected character '%c'", ch);
-		error(t, msg);
-		next(t);
-		break;
-	}
-	}
-}
-
 void usec_tokenizer_tokenize(USEC_Tokenizer* t) {
 	if (!t->input) return;
 	t->length = strlen(t->input);
@@ -656,7 +539,7 @@ void usec_tokenizer_tokenize(USEC_Tokenizer* t) {
 	// Unclosed openers
 	if (t->opener_stack_size > 0) {
 		for (size_t i = 0; i < t->opener_stack_size; ++i) {
-			error_t(t, "Unclosed opener", t->opener_stack[i]);
+			error_t(t, "Unclosed opener", &t->opener_stack[i]);
 		}
 	}
 }

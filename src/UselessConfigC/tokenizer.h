@@ -5,7 +5,6 @@
 #include <stddef.h>
 
 typedef enum {
-	TOK_EOF,
 	TOK_NEWLINE,
 	TOK_SPACE,
 	TOK_IDENTIFIER,
@@ -32,14 +31,14 @@ typedef enum {
 	TOK_COMMENT
 } USEC_TokenType;
 
-typedef struct {
+typedef struct USEC_Token {
 	USEC_TokenType type;
 	char* value;
 	int line;
 	int col;
 } USEC_Token;
 
-typedef struct {
+typedef struct USEC_Tokenizer {
 	const char* input;
 	size_t length;
 	size_t index;

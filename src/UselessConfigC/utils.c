@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdio.h>
 
 #define SB_INITIAL_CAPACITY 64
 
@@ -40,11 +41,15 @@ int asprintf(char** str, const char* fmt, ...) {
 
 SB sb_create(void) {
 	SB sb;
-	sb.length = 0;
-	sb.capacity = SB_INITIAL_CAPACITY;
-	sb.buffer = (char*)malloc(sb.capacity);
-	if (sb.buffer) sb.buffer[0] = '\0';
+	sb_init(&sb);
 	return sb;
+}
+
+void sb_init(SB* sb) {
+	sb->length = 0;
+	sb->capacity = SB_INITIAL_CAPACITY;
+	sb->buffer = (char*)malloc(sb->capacity);
+	if (sb->buffer) sb->buffer[0] = '\0';
 }
 
 void sb_append_char(SB* sb, char ch) {
@@ -90,8 +95,7 @@ void sb_clear(SB* sb) {
 		free(sb->buffer);
 		sb->buffer = NULL;
 	}
-	sb->length = 0;
-	sb->capacity = 0;
+	sb_init(sb);
 }
 
 void sb_free(SB* sb) {

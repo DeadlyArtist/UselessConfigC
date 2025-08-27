@@ -2,8 +2,7 @@
 #define USEC_PARSER_H
 
 #include "tokenizer.h"
-#include "hashtable.h"
-#include "usec.h"
+#include <usec/usec.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -20,7 +19,7 @@ typedef struct {
 	bool debug;
 
 	// Variables + stack of scopes
-	Usec_Hashtable* variables; // top-level/global
+	Usec_Hashtable* variables; // toplevel/global
 	Usec_Hashtable* var_stack[USEC_VAR_STACK_MAX];
 	size_t var_stack_size;
 } USEC_Parser;

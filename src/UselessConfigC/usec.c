@@ -1,4 +1,4 @@
-#include "usec.h"
+#include <usec/usec.h>
 #include "parser.h"
 #include "tokenizer.h"
 #include "utils.h"
@@ -25,6 +25,28 @@ static void append_escaped_string(SB* sb, const char* raw) {
 		}
 	}
 	sb_append_char(sb, '"');
+}
+
+static void append_escaped_multiline_comment(SB* sb, const char* text) {
+	while (*text) {
+		if (text[0] == '%' && text[1] == '%') {
+			sb_append_str(sb, "%\\%");
+			text += 2;
+		} else {
+			sb_append_char(sb, *text++);
+		}
+	}
+}
+
+static bool is_valid_identifier(const char* str) {
+	if (!str || !isalpha((unsigned char)str[0]) && str[0] != '_')
+		return false;
+
+	for (const char* p = str + 1; *p; ++p) {
+		if (!isalnum((unsigned char)*p) && *p != '_')
+			return false;
+	}
+	return true;
 }
 
 static void indent_level(SB* sb, int level) {
@@ -86,13 +108,16 @@ USEC_ParseOptions usec_get_default_parse_options(void) {
 	opts.keepVariables = false;
 	opts.debugTokens = false;
 	opts.debugParser = false;
-	opts.variable_keys = NULL;
-	opts.variable_values = NULL;
-	opts.variable_count = 0;
+	opts.variables = NULL;
 	return opts;
 }
 
-USEC_Value* usec_clone_value(const USEC_Value* val) {
+USEC_ToStringOptions usec_get_default_tostring_options(void) {
+	USEC_ToStringOptions opts = { .readable = true, .enable_variables = false };
+	return opts;
+}
+
+USEC_Value* usec_clone(const USEC_Value* val) {
 	if (!val) return NULL;
 
 	USEC_Value* out = malloc(sizeof(USEC_Value));
@@ -135,7 +160,7 @@ USEC_Value* usec_clone_value(const USEC_Value* val) {
 		}
 		out->arrayValue.items = malloc(sizeof(USEC_Value*) * val->arrayValue.count);
 		for (size_t i = 0; i < val->arrayValue.count; ++i) {
-			out->arrayValue.items[i] = usec_clone_value(val->arrayValue.items[i]);
+			out->arrayValue.items[i] = usec_clone(val->arrayValue.items[i]);
 		}
 		break;
 	}
@@ -145,7 +170,7 @@ USEC_Value* usec_clone_value(const USEC_Value* val) {
 		for (size_t i = 0; i < val->objectValue->capacity; ++i) {
 			Usec_HashNode* cur = val->objectValue->buckets[i];
 			while (cur) {
-				usec_ht_set(out->objectValue, cur->key, usec_clone_value(cur->value));
+				usec_ht_set(out->objectValue, cur->key, usec_clone(cur->value));
 				cur = cur->next;
 			}
 		}
@@ -162,17 +187,17 @@ USEC_Value* usec_clone_value(const USEC_Value* val) {
 		break;
 	case VALUE_FORMAT: {
 		USEC_FormatNode* out_fmt = malloc(sizeof(USEC_FormatNode));
-		out_fmt->node = usec_clone_value(val->formatNode->node);
+		out_fmt->node = usec_clone(val->formatNode->node);
 
 		out_fmt->before_count = val->formatNode->before_count;
 		out_fmt->before = malloc(sizeof(USEC_Value*) * out_fmt->before_count);
 		for (size_t i = 0; i < out_fmt->before_count; ++i)
-			out_fmt->before[i] = usec_clone_value(val->formatNode->before[i]);
+			out_fmt->before[i] = usec_clone(val->formatNode->before[i]);
 
 		out_fmt->after_count = val->formatNode->after_count;
 		out_fmt->after = malloc(sizeof(USEC_Value*) * out_fmt->after_count);
 		for (size_t i = 0; i < out_fmt->after_count; ++i)
-			out_fmt->after[i] = usec_clone_value(val->formatNode->after[i]);
+			out_fmt->after[i] = usec_clone(val->formatNode->after[i]);
 
 		out->formatNode = out_fmt;
 		break;
@@ -185,7 +210,11 @@ USEC_Value* usec_clone_value(const USEC_Value* val) {
 USEC_Value* usec_parse(const char* input, const USEC_ParseOptions* options) {
 	if (!input) return NULL;
 
-	if (!options) options = usec_get_default_parse_options();
+	USEC_ParseOptions default_opts;
+	if (!options) {
+		default_opts = usec_get_default_parse_options();
+		options = &default_opts;
+	}
 
 	// Tokenize
 	USEC_Tokenizer tokenizer;
@@ -199,7 +228,7 @@ USEC_Value* usec_parse(const char* input, const USEC_ParseOptions* options) {
 
 	// Parse
 	USEC_Parser parser;
-	usec_parser_init(&parser, tokenizer.tokens, tokenizer.token_count);
+	usec_parser_init(&parser, tokenizer.tokens, tokenizer.token_count, options->variables);
 	parser.pedantic = options->pedantic;
 	parser.keep_variables = options->keepVariables;
 	parser.compact = tokenizer.compact;
@@ -263,67 +292,71 @@ bool usec_equals(const USEC_Value* a, const USEC_Value* b) {
 //      Stringification
 // ==============================
 
-static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, int level);
+static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, bool is_file, int level);
+static void to_string_value_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, int level);
 
-static void to_object_string(const USEC_Value* object, SB* sb, bool readable, bool enable_vars, int level) {
-	if (!object || object->type != VALUE_OBJECT || !object->objectValue) {
-		sb_append_str(sb, "{}");
+static void to_object_string(const USEC_Value* object, SB* sb, bool readable, bool enable_vars, bool is_file, int level) {
+	if (!object || object->objectValue->size == 0) {
+		if (!is_file) sb_append_str(sb, "{}");
 		return;
 	}
 
 	Usec_Hashtable* ht = object->objectValue;
 	size_t count = 0;
 
-	sb_append_char(sb, '{');
-	if (readable && ht->size > 0) sb_append_char(sb, '\n');
+	if (!is_file) sb_append_char(sb, '{');
+	if (!is_file && readable) sb_append_char(sb, '\n');
 
-	for (size_t i = 0; i < ht->capacity; ++i) {
-		for (Usec_HashNode* node = ht->buckets[i]; node; node = node->next) {
-			if (count++ > 0) {
-				if (readable) sb_append_char(sb, '\n');
-				else sb_append_char(sb, ',');
-			}
-
-			if (readable) indent_level(sb, level + 1);
-
-			const char* key = node->key;
-			if (enable_vars && key[0] == '$') {
-				sb_append_char(sb, ':');
-				sb_append_str(sb, key + 1);
-			} else {
-				append_escaped_string(sb, key);
-			}
-
-			sb_append_str(sb, readable ? " = " : "=");
-			to_string_internal(node->value, sb, readable, enable_vars, level + 1);
+	Usec_HashNode* node = ht->order_head;
+	while (node) {
+		if (count++ > 0) {
+			if (readable) sb_append_char(sb, '\n');
+			else sb_append_char(sb, ',');
 		}
+
+		if (!is_file && readable) indent_level(sb, level + 1);
+
+		const char* key = node->key;
+		if (enable_vars && key[0] == '$') {
+			sb_append_char(sb, ':');
+			sb_append_str(sb, key + 1);
+		} else if (is_valid_identifier(key)) {
+			sb_append_str(sb, key);  // plain key
+		} else {
+			append_escaped_string(sb, key);  // escaped if needed
+		}
+
+		sb_append_str(sb, readable ? " = " : "=");
+		to_string_value_internal(node->value, sb, readable, enable_vars, is_file ? level : level + 1);
+
+		node = node->order_next;
 	}
 
-	if (ht->size > 0 && readable) {
+	if (!is_file && readable) {
 		sb_append_char(sb, '\n');
 		indent_level(sb, level);
 	}
 
-	sb_append_char(sb, '}');
+	if (!is_file) sb_append_char(sb, '}');
 }
 
 static void to_array_string(const USEC_Value* array, SB* sb, bool readable, bool enable_vars, int level) {
-	if (!array || array->type != VALUE_ARRAY) {
+	if (!array || array->arrayValue.count == 0) {
 		sb_append_str(sb, "[]");
 		return;
 	}
 
 	sb_append_char(sb, '[');
-	if (readable && array->arrayValue.count > 0) sb_append_char(sb, '\n');
+	if (readable) sb_append_char(sb, '\n');
 
 	for (size_t i = 0; i < array->arrayValue.count; ++i) {
 		if (i > 0) sb_append_str(sb, readable ? "\n" : ",");
 
 		if (readable) indent_level(sb, level + 1);
-		to_string_internal(array->arrayValue.items[i], sb, readable, enable_vars, level + 1);
+		to_string_value_internal(array->arrayValue.items[i], sb, readable, enable_vars, level + 1);
 	}
 
-	if (array->arrayValue.count > 0 && readable) {
+	if (readable) {
 		sb_append_char(sb, '\n');
 		indent_level(sb, level);
 	}
@@ -331,7 +364,7 @@ static void to_array_string(const USEC_Value* array, SB* sb, bool readable, bool
 	sb_append_char(sb, ']');
 }
 
-static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, int level) {
+static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, bool is_file, int level) {
 	if (!val) {
 		sb_append_str(sb, "null");
 		return;
@@ -368,8 +401,29 @@ static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, boo
 	}
 
 	case VALUE_CHAR: {
-		char buf[4] = { '\'', val->charValue, '\'', '\0' };
-		sb_append_str(sb, buf);
+		char escaped[8];
+
+		switch (val->charValue) {
+		case '\n': strcpy(escaped, "'\\n'"); break;
+		case '\r': strcpy(escaped, "'\\r'"); break;
+		case '\t': strcpy(escaped, "'\\t'"); break;
+		case '\'': strcpy(escaped, "'\\''"); break;
+		case '\\': strcpy(escaped, "'\\\\'"); break;
+		default:
+			if ((unsigned char)val->charValue < 32 || (unsigned char)val->charValue >= 127) {
+				// non-printable (e.g. control chars): use hex escape
+				snprintf(escaped, sizeof(escaped), "'\\x%02x'", (unsigned char)val->charValue);
+			} else {
+				// printable ASCII
+				escaped[0] = '\'';
+				escaped[1] = val->charValue;
+				escaped[2] = '\'';
+				escaped[3] = '\0';
+			}
+			break;
+		}
+
+		sb_append_str(sb, escaped);
 		break;
 	}
 
@@ -391,9 +445,8 @@ static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, boo
 		break;
 
 	case VALUE_OBJECT:
-		to_object_string(val, sb, readable, enable_vars, level);
+		to_object_string(val, sb, readable, enable_vars, is_file, level);
 		break;
-	}
 
 	// Formatting
 	case VALUE_COMMENT:
@@ -406,7 +459,7 @@ static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, boo
 	case VALUE_MULTILINE_COMMENT:
 		if (readable) {
 			sb_append_str(sb, "%%\n");
-			sb_append_str(sb, val->commentText);
+			append_escaped_multiline_comment(sb, val->commentText);
 			sb_append_str(sb, "\n%%");
 		}
 		break;
@@ -417,43 +470,51 @@ static void to_string_internal(const USEC_Value* val, SB* sb, bool readable, boo
 				sb_append_char(sb, '\n');
 		}
 		break;
-	case VALUE_FORMAT: {
+	case VALUE_FORMAT:
 		if (readable && val->formatNode) {
 			for (size_t i = 0; i < val->formatNode->before_count; ++i) {
 				if (val->formatNode->before[i]->type != VALUE_NEWLINE) indent_level(sb, level);
-				to_string_internal(val->formatNode->before[i], sb, readable, enable_vars, level);
+				to_string_value_internal(val->formatNode->before[i], sb, readable, enable_vars, level);
 				sb_append_char(sb, '\n');
 			}
 
-			to_string_internal(val->formatNode->node, sb, readable, enable_vars, level);
+			to_string_value_internal(val->formatNode->node, sb, readable, enable_vars, level);
 
 			for (size_t i = 0; i < val->formatNode->after_count; ++i) {
 				if (val->formatNode->after[i]->type != VALUE_NEWLINE) indent_level(sb, level);
 				sb_append_char(sb, '\n');
-				to_string_internal(val->formatNode->after[i], sb, readable, enable_vars, level);
+				to_string_value_internal(val->formatNode->after[i], sb, readable, enable_vars, level);
 			}
 		} else if (val->formatNode) {
-			to_string_internal(val->formatNode->node, sb, readable, enable_vars, level);
+			to_string_value_internal(val->formatNode->node, sb, readable, enable_vars, level);
 		}
 		break;
 	}
 }
 
-char* usec_to_string(const USEC_Value* root, bool readable, bool enable_variables) {
-	if (!root) {
-		return strdup(readable ? "!" : "%!");
-	}
+static void to_string_value_internal(const USEC_Value* val, SB* sb, bool readable, bool enable_vars, int level) {
+	to_string_internal(val, sb, readable, enable_vars, false, level);
+}
 
+char* usec_to_value_string(const USEC_Value* root, const USEC_ToStringOptions* options) {
+	USEC_ToStringOptions opts = options ? *options : usec_get_default_tostring_options();
+	SB sb = sb_create();
+	to_string_value_internal(root, &sb, opts.readable, opts.enable_variables, 0);
+	return sb_build(&sb);
+}
+
+char* usec_to_string(const USEC_Value* root, const USEC_ToStringOptions* options) {
+	USEC_ToStringOptions opts = options ? *options : usec_get_default_tostring_options();
 	SB sb = sb_create();
 
-	if (!readable) {
+	if (!opts.readable) {
 		sb_append_char(&sb, '%');
 	}
 	if (root->type != VALUE_OBJECT) {
 		sb_append_char(&sb, '!');
 	}
 
-	to_string_internal(root, &sb, readable, enable_variables, 0);
+	to_string_internal(root, &sb, opts.readable, opts.enable_variables, true, 0);
 
 	return sb_build(&sb);
 }

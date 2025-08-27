@@ -5,9 +5,10 @@
 extern "C" {
 #endif
 
-#include "tokenizer.h"
-#include "parser.h"
-#include "hashtable.h"
+	typedef struct USEC_Value USEC_Value;
+	typedef struct Usec_Hashtable Usec_Hashtable;
+	typedef struct Usec_HashNode Usec_HashNode;
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -36,7 +37,6 @@ extern "C" {
 		VALUE_NEWLINE
 	} USEC_ValueType;
 
-	typedef struct USEC_Value USEC_Value;
 	typedef struct USEC_FormatNode USEC_FormatNode;
 
 	// Parsed value node
@@ -87,12 +87,24 @@ extern "C" {
 		Usec_Hashtable* variables; // Note: The contents will be modified by the parser. To avoid, use usec_ht_from.
 	} USEC_ParseOptions;
 
+	typedef struct {
+		bool readable;
+		bool enable_variables;
+	} USEC_ToStringOptions;
+
 	/**
 	 * Returns properly initialized default parse options.
 	 *
 	 * @return A USEC_ParseOptions struct with default values.
 	 */
 	USEC_ParseOptions usec_get_default_parse_options(void);
+
+	/**
+	 * Returns default options for usec_to_string.
+	 *
+	 * @return A USEC_ToStringOptions struct with sane default values.
+	 */
+	USEC_ToStringOptions usec_get_default_tostring_options(void);
 
 	// ==============================
 	//      Public API Functions
@@ -101,7 +113,7 @@ extern "C" {
 	/**
 	 * Deep clones a USEC_Value object
 	 */
-	USEC_Value* usec_parser_clone_value(const USEC_Value* val);
+	USEC_Value* usec_clone(const USEC_Value* val);
 
 	/**
 	 * Parse a USEC string into a fully dynamic object.
@@ -113,6 +125,16 @@ extern "C" {
 	USEC_Value* usec_parse(const char* input, const USEC_ParseOptions* options);
 
 	/**
+	 * Convert a USEC_Value tree back to a full file string.
+	 *
+	 * @param root The data structure to convert
+	 * @param readable Whether to format with readable indentation
+	 * @param enable_variables Enable variable injection
+	 * @return Dynamically allocated string (caller must free)
+	 */
+	char* usec_to_string(const USEC_Value* root, const USEC_ToStringOptions* options);
+
+	/**
 	 * Convert a USEC_Value tree back to a string.
 	 *
 	 * @param root The data structure to convert
@@ -120,7 +142,7 @@ extern "C" {
 	 * @param enable_variables Enable variable injection
 	 * @return Dynamically allocated string (caller must free)
 	 */
-	char* usec_to_string(const USEC_Value* root, bool readable, bool enable_variables);
+	char* usec_to_value_string(const USEC_Value* root, const USEC_ToStringOptions* options);
 
 	/**
 	 * Free a USEC_Value and its contents recursively.
@@ -138,9 +160,35 @@ extern "C" {
 	 */
 	bool usec_equals(const USEC_Value* a, const USEC_Value* b);
 
+	// Represents a key-value pair node used internally by the Usec_Hashtable. Linked as a chain to handle hash collisions.
+	struct Usec_HashNode {
+		char* key;
+		USEC_Value* value;
+		struct Usec_HashNode* next;
+		struct Usec_HashNode* order_prev;
+		struct Usec_HashNode* order_next;
+	};
+
+
+    // A simple hash table for storing key-value pairs representing USEC object members. Preserves order.
+	struct Usec_Hashtable {
+		size_t capacity;
+		size_t size;
+		Usec_HashNode** buckets;
+		Usec_HashNode* order_head;
+		Usec_HashNode* order_tail;
+	};
+
+	Usec_Hashtable* usec_ht_create(size_t capacity);
+	void usec_ht_set(Usec_Hashtable* ht, const char* key, USEC_Value* value);
+	USEC_Value* usec_ht_get(Usec_Hashtable* ht, const char* key);
+	void usec_ht_free(Usec_Hashtable* ht);
+	void usec_ht_foreach(Usec_Hashtable* ht, void (*fn)(const char* key, USEC_Value* value));
+	Usec_Hashtable* usec_ht_from(const Usec_Hashtable* source);
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // USEC_PARSER_H
+#endif // USEC_H

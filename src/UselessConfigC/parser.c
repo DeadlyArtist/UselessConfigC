@@ -65,7 +65,7 @@ static bool sb_append_value_repr(SB* sb, USEC_Value* val) {
 // Helper for variable scopes
 static void scope_push(USEC_Parser* p, Usec_Hashtable* vars) {
 	if (p->var_stack_size >= USEC_VAR_STACK_MAX) {
-		fprintf(stderr, "Exceeded variable scope stack\n");
+		fprintf(stderr, "[USEC PARSER] Error: Exceeded variable scope stack\n");
 		exit(3);
 	}
 	p->var_stack[p->var_stack_size++] = vars;
@@ -77,13 +77,13 @@ static void scope_pop(USEC_Parser* p) {
 	}
 }
 
-static const char* get_variable(USEC_Parser* p, USEC_Token* tok) {
+static USEC_Value* get_variable(USEC_Parser* p, USEC_Token* tok) {
 	const char* name = tok->value;
-	const char* result = NULL;
+	USEC_Value* result = NULL;
 
 	// Search stack from top (n-1) to index 1 for local scopes
 	if (p->var_stack_size > 1) {
-		for (ssize_t i = (ssize_t)p->var_stack_size - 1; i >= 1; --i) {
+		for (int i = (int)p->var_stack_size - 1; i >= 1; --i) {
 			result = usec_ht_get(p->var_stack[i], name);
 			if (result) return result;
 		}
@@ -98,12 +98,6 @@ static const char* get_variable(USEC_Parser* p, USEC_Token* tok) {
 	}
 
 	return result;
-}
-
-static void define_variable(USEC_Parser* p, const char* name, const char* value) {
-	if (p->var_stack_size > 0) {
-		usec_ht_set(p->var_stack[p->var_stack_size - 1], name, value);
-	}
 }
 
 // Current token
@@ -137,18 +131,17 @@ static bool optional(USEC_Parser* p, USEC_TokenType type) {
 	return false;
 }
 
-static bool expect(USEC_Parser* p, USEC_TokenType type) {
+static bool assert(USEC_Parser* p, USEC_TokenType type) {
 	if (!check(p, type)) {
 		parser_error(p, current(p), "Unexpected token");
 		return false;
 	}
-	next(p);
 	return true;
 }
 
-static bool cons_ret(USEC_TokenType type) {
-	if (expect(type)) next();
-	else if (check(TOK_NEWLINE)) return true;
+static bool cons_ret(USEC_Parser* p, USEC_TokenType type) {
+	if (assert(p, type)) next(p);
+	else if (check(p, TOK_NEWLINE)) return true;
 	return false;
 }
 
@@ -214,30 +207,29 @@ static USEC_Value* parse_number(USEC_Parser* p) {
 }
 
 static USEC_Value* parse_string(USEC_Parser* p) {
-	expect(p, TOK_STRING_START);
-
-	SB builder = sb_create();
+	assert(p, TOK_STRING_START);
+	next(p);
+	SB sb = sb_create();
 
 	while (!eof(p)) {
 		USEC_Token* tok = current(p);
-
 		if (tok->type == TOK_STRING) {
 			// Add literal string content
-			sb_append_str(&builder, tok->value);
+			sb_append_str(&sb, tok->value);
 			next(p);
 		} else if (tok->type == TOK_IDENTIFIER) {
 			// Variable interpolation
 			if (p->keep_variables) {
-				sb_append_str(&builder, "$(");
-				sb_append_str(&builder, tok->value);
-				sb_append_char(&builder, ')');
+				sb_append_str(&sb, "$(");
+				sb_append_str(&sb, tok->value);
+				sb_append_char(&sb, ')');
 			} else {
 				// Resolve interpolated value from scope
-				USEC_Value* resolved = get_variable(p, tok->value);
+				USEC_Value* resolved = get_variable(p, tok);
 				if (resolved && resolved->type == VALUE_STRING) {
-					sb_append_str(&builder, resolved->stringValue);
+					sb_append_str(&sb, resolved->stringValue);
 				} else if (resolved) {
-					if (!sb_append_value_repr(sb, resolved)) parser_error(p, tok, "Unsupported string interpolation");
+					if (!sb_append_value_repr(&sb, resolved)) parser_error(p, tok, "Unsupported string interpolation");
 				} else {
 					parser_error(p, tok, "Undefined variable");
 				}
@@ -252,7 +244,7 @@ static USEC_Value* parse_string(USEC_Parser* p) {
 		}
 	}
 
-	char* final = sb_build(&builder);
+	char* final = sb_build(&sb);
 	USEC_Value* val = make_value(VALUE_STRING);
 	val->stringValue = final ? final : strdup("");
 	return val;
@@ -305,19 +297,21 @@ static USEC_Value* parse_identifier(USEC_Parser* p) {
 	}
 }
 
-static USEC_Value* parse_statement(USEC_Parser* p);
+static USEC_Statement* parse_statement(USEC_Parser* p);
 
-static void define_variable(USEC_Parser* p, const char* name, USEC_Value* val) {
-	usec_ht_set(p->var_stack[p->var_stack_size - 1], name, val);
-}
-
-static USEC_Statement* parse_declaration(USEC_Parser* p, USEC_Value* obj) {
+static USEC_Statement* parse_declaration(USEC_Parser* p) {
 	next(p);  // consume ':'
 
-	if (!cons_ret(p, TOK_IDENTIFIER)) return NULL;
+	char* key = NULL;
 
-	const char* key = current(p)->value;
-	next(p);
+	if (check(p, TOK_IDENTIFIER)) {
+		key = strdup(current(p)->value);
+		next(p);
+	} else {
+		if (check(p, TOK_NEWLINE)) return NULL;
+		parser_error(p, current(p), "Expected identifier key in declaration");
+		return NULL;
+	}
 
 	if (!p->compact && cons_ret(p, TOK_SPACE)) return NULL;
 	if (cons_ret(p, TOK_EQUALS)) return NULL;
@@ -329,7 +323,7 @@ static USEC_Statement* parse_declaration(USEC_Parser* p, USEC_Value* obj) {
 	USEC_Statement* stmt = malloc(sizeof(USEC_Statement));
 	stmt->type = STATEMENT_DECLARATION;
 	stmt->key = key;
-	stmt->value = value;
+	stmt->value = val;
 	return stmt;
 }
 
@@ -376,7 +370,8 @@ static USEC_Statement* parse_statement(USEC_Parser* p) {
 }
 
 static USEC_Value* parse_array(USEC_Parser* p) {
-	expect(p, TOK_ARRAY_OPEN);
+	assert(p, TOK_ARRAY_OPEN);
+	next(p);
 
 	USEC_Value* arr = make_value(VALUE_ARRAY);
 	arr->arrayValue.items = NULL;
@@ -398,11 +393,12 @@ static USEC_Value* parse_array(USEC_Parser* p) {
 			arr->arrayValue.items[arr->arrayValue.count++] = item;
 		}
 
-		if (check(TOK_NEWLINE)) {
-			if (peek()->type == TOK_ARRAY_CLOSE && p->compact) parser_error(p, current(p), "Unnecessary newline");
-			next();
-		} else expect(TOK_ARRAY_CLOSE);
+		if (check(p, TOK_NEWLINE)) {
+			if (peek(p)->type == TOK_ARRAY_CLOSE && p->compact) parser_error(p, current(p), "Unnecessary newline");
+			next(p);
+		} else assert(p, TOK_ARRAY_CLOSE);
 	}
+	next(p);
 
 	// Shrink to fit
 	if (arr->arrayValue.count < capacity) {
@@ -413,7 +409,8 @@ static USEC_Value* parse_array(USEC_Parser* p) {
 }
 
 static USEC_Value* parse_object(USEC_Parser* p) {
-	expect(p, TOK_BRACE_OPEN);
+	assert(p, TOK_BRACE_OPEN);
+	next(p);
 
 	USEC_Value* obj = malloc(sizeof(USEC_Value));
 	obj->type = VALUE_OBJECT;
@@ -454,14 +451,15 @@ static USEC_Value* parse_object(USEC_Parser* p) {
 			}
 		}
 
-		if (check(TOK_NEWLINE)) {
-			if (peek()->type == TOK_BRACE_CLOSE && p->compact) parser_error(p, current(p), "Unnecessary newline");
-			next();
-		} else expect(TOK_BRACE_CLOSE);
+		if (check(p, TOK_NEWLINE)) {
+			if (peek(p)->type == TOK_BRACE_CLOSE && p->compact) parser_error(p, current(p), "Unnecessary newline");
+			next(p);
+		} else assert(p, TOK_BRACE_CLOSE);
 
 		// cleanup
 		if (stmt) free(stmt->key), free(stmt);
 	}
+	next(p);
 
 	if (local) {
 		usec_ht_free(local);
@@ -472,8 +470,6 @@ static USEC_Value* parse_object(USEC_Parser* p) {
 }
 
 static USEC_Value* parse_file(USEC_Parser* p) {
-	expect(p, TOK_BRACE_OPEN);
-
 	USEC_Value* obj = malloc(sizeof(USEC_Value));
 	obj->type = VALUE_OBJECT;
 	obj->objectValue = usec_ht_create(8);
@@ -498,9 +494,11 @@ static USEC_Value* parse_file(USEC_Parser* p) {
 				// Store in object
 				usec_ht_set(obj->objectValue, stmt->key, stmt->value);
 			}
+
+			if (p->debug) printf("[Value] %d:%d '%s%s = %s'\n", line, col, stmt->type == STATEMENT_DECLARATION ? ":" : "", stmt->key, usec_to_value_string(stmt->value, NULL));
 		}
 
-		if (!eof(p)) expect(p, TOK_NEWLINE);
+		if (!eof(p)) assert(p, TOK_NEWLINE);
 		next(p);
 
 		// cleanup
@@ -560,7 +558,7 @@ USEC_Value* usec_parser_parse(USEC_Parser* p) {
 		next(p);
 		return parse_value(p);
 	}
-	return parse_object(p);
+	return parse_file(p);
 }
 
 void usec_parser_init(USEC_Parser* p, USEC_Token* tokens, size_t token_count, Usec_Hashtable* variables) {
